@@ -1,0 +1,413 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Turbo_Racer_Alfa1.Addons;
+using Turbo_Racer_Alfa1.Models;
+using Turbo_Racer_Alfa1.Entities;
+
+namespace Turbo_Racer_Alfa1.Main
+{
+    class TurboRacerGame
+    {
+
+        const string Reset = "\x1b[0m", Red = "\x1b[31m", Green = "\x1b[32m",
+                     Yellow = "\x1b[33m", Blue = "\x1b[34m", Cyan = "\x1b[36m",
+                     White = "\x1b[37m", Bold = "\x1b[1m", Gray = "\x1b[90m", Magenta = "\x1b[35m";
+        
+        const string CyanGlow = "\x1b[38;5;81m";
+        const string Orange = "\x1b[38;5;208m";
+        const string Purple = "\x1b[38;5;141m";
+        const string DarkGray = "\x1b[38;5;240m";
+        const string NeonGreen = "\x1b[38;5;82m";
+
+        const string ScoreFile = "highscores.txt";
+        enum State { Menu, Settings, Playing, GameOver, Database }
+        State currentState = State.Menu;
+
+        Player player = new Player();
+        List<Entity> entities = new List<Entity>();
+        List<ScoreEntry> scoreHistory = new List<ScoreEntry>();
+        Random rng = new Random();
+        Thread musicThread;
+
+        int gameSpeed = 45;
+        string difficultyName = "Easy";
+        int healthLimit = 5;
+        int maxSpawnCount = 1;
+        int repairInterval = 200;
+        int signInterval = 250;
+        int lastRepairScore = 0;
+        int lastSignScore = 0;
+
+        bool isRunning = true;
+        int roadOffset = 0;
+
+        const int RoadLeft = 5, RoadRight = 65, RoadHeight = 22;
+        readonly int[] spawnPositions = { 12, 20, 27, 35, 42, 50, 57 };
+        readonly string[] brightColors = { Green, Yellow, Cyan, Magenta, Bold + Blue };
+        readonly string[][] carModels = {
+        new string[] { "o---o", "| A |", "o---o" },
+        new string[] { "/---\\", "| S |", "\\---/" },
+        new string[] { "H---H", "[ T ]", "H---H" },
+        new string[] { "-=X=-", " |V| ", "-=X=-" }
+        };
+
+        void SoundMove() => Console.Beep(450, 15);
+        void SoundCrash() => Console.Beep(180, 100);
+        void SoundRepair() => Console.Beep(900, 60);
+        void SoundGameOver() { Console.Beep(300, 200); Console.Beep(200, 200); Console.Beep(150, 400); }
+
+        public void Start()
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            LoadScoresFromFile();
+            try { Console.CursorVisible = false; } catch { }
+
+            while (isRunning)
+            {
+                switch (currentState)
+                {
+                    case State.Menu: DrawMenu(); break;
+                    case State.Settings: DrawSettings(); break;
+                    case State.Database: DrawDatabase(); break;
+                    case State.Playing: UpdateGame(); break;
+                    case State.GameOver: DrawGameOver(); break;
+                }
+            }
+        }
+
+        void SaveScoreToFile(string name, int score) { try { File.AppendAllText(ScoreFile, $"{name}|{score}" + Environment.NewLine); scoreHistory.Add(new ScoreEntry { Name = name, Score = score }); } catch { } }
+
+        void LoadScoresFromFile()
+        {
+            scoreHistory.Clear();
+            try
+            {
+                if (File.Exists(ScoreFile))
+                {
+                    string[] lines = File.ReadAllLines(ScoreFile);
+                    foreach (string line in lines)
+                    {
+                        string[] parts = line.Split('|');
+                        if (parts.Length == 2 && int.TryParse(parts[1], out int s))
+                            scoreHistory.Add(new ScoreEntry { Name = parts[0], Score = s });
+                    }
+                }
+            }
+            catch { }
+        }
+
+        void DrawCentered(string text)
+        {
+            int width = Console.WindowWidth;
+            string cleanText = Regex.Replace(text, @"\x1b\[[0-9;]*m", "");
+            int spaces = Math.Max(0, (width / 2) - (cleanText.Length / 2));
+            Console.WriteLine(new string(' ', spaces) + text);
+        }
+
+        void DrawMenu()
+        {
+            if (musicThread == null || !musicThread.IsAlive)
+            {
+                musicThread = new Thread(MusicPlayer.PlayHelmetBetter) { IsBackground = true };
+                musicThread.Start();
+            }
+
+            Console.Clear();
+            Console.WriteLine("\n\n");
+            DrawCentered($"{Blue}{Bold}╔══════════════════════════════════════════╗{Reset}");
+            DrawCentered($"{Blue}{Bold}║             🏎️  {Yellow}TURBO RACER{Blue}              ║{Reset}");
+            DrawCentered($"{Blue}{Bold}╚══════════════════════════════════════════╝{Reset}");
+
+            var best = scoreHistory.OrderByDescending(x => x.Score).FirstOrDefault();
+            if (scoreHistory.Any()) DrawCentered($"{Green}{Bold}★ ALL-TIME BEST: {best.Name} ({best.Score}) ★{Reset}");
+
+            Console.WriteLine("\n");
+
+            // Square Box Style Menu
+            DrawCentered($"{White}╔══════════════════╗  ╔══════════════════╗{Reset}");
+            DrawCentered($"{White}║ [1] {Green}START MISSION{White} ║  ║ [2] {Cyan}DIFFICULTY   {White} ║{Reset}");
+            DrawCentered($"{White}╚══════════════════╝  ╚══════════════════╝{Reset}");
+            Console.WriteLine();
+            DrawCentered($"{White}╔══════════════════╗  ╔══════════════════╗{Reset}");
+            DrawCentered($"{White}║ [3] {Yellow}HALL OF FAME {White} ║  ║ [4] {Red}TERMINATE    {White} ║{Reset}");
+            DrawCentered($"{White}╚══════════════════╝  ╚══════════════════╝{Reset}");
+
+            Console.WriteLine("\n");
+
+            var key = Console.ReadKey(true).Key;
+            if (key == ConsoleKey.D1 || key == ConsoleKey.NumPad1)
+            {
+                StopMusic();
+                LoginAndStart();
+            }
+            else if (key == ConsoleKey.D2 || key == ConsoleKey.NumPad2) currentState = State.Settings;
+            else if (key == ConsoleKey.D3 || key == ConsoleKey.NumPad3) currentState = State.Database;
+            else if (key == ConsoleKey.D4 || key == ConsoleKey.NumPad4) isRunning = false;
+        }
+
+        private void StopMusic()
+        {
+            if (musicThread != null && musicThread.IsAlive)
+            {
+                musicThread.Interrupt(); // Sends the signal to the catch block above
+                musicThread.Join();      // Wait for it to actually finish
+            }
+        }
+
+        void LoginAndStart()
+        {
+            StopMusic();
+            Console.Clear();
+            Console.WriteLine("\n\n\n");
+            DrawCentered($"{Cyan}ENTER DRIVER IDENTIFICATION:{Reset}");
+            Console.SetCursorPosition(Math.Max(0, Console.WindowWidth / 2 - 10), Console.CursorTop + 1);
+            Console.CursorVisible = true;
+            string name = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(name)) name = "Unknown";
+            Console.CursorVisible = false;
+            ResetGame();
+            player.Name = name;
+
+            // START DEFTONES MUSIC FOR DRIVING
+            musicThread = new Thread(MusicPlayer.PlayDeftones) { IsBackground = true };
+            musicThread.Start();
+
+            currentState = State.Playing;
+        }
+
+        void DrawDatabase()
+        {
+            Console.Clear();
+            Console.WriteLine("\n\n");
+            DrawCentered($"{Yellow}═══ 🏆 GLOBAL HALL OF FAME 🏆 ═══{Reset}");
+            var top5 = scoreHistory.OrderByDescending(x => x.Score).Take(5).ToList();
+            if (!top5.Any()) DrawCentered($"{Gray}No driver data available yet.{Reset}");
+            else
+            {
+                for (int i = 0; i < top5.Count; i++)
+                    DrawCentered($"{(i == 0 ? Yellow : (i == 1 ? White : Gray))}#{i + 1} {top5[i].Name.PadRight(12)} : {top5[i].Score:D6}{Reset}");
+            }
+            Console.WriteLine("\n\n" + Gray + "Press any key to go back" + Reset);
+            Console.ReadKey(true);
+            currentState = State.Menu;
+        }
+
+        void DrawSettings()
+        {
+            Console.Clear();
+            Console.WriteLine("\n\n");
+            DrawCentered($"{Bold}{White}─── {Cyan}SELECT YOUR INTENSITY{White} ───{Reset}");
+            Console.WriteLine("\n");
+
+            // EASY MODE - Half-Drawn Bar Style
+            DrawCentered($"{Green}╔══════════════════════════════════════════╗{Reset}");
+            DrawCentered($"{Green}║ [1] EASY MODE                            ║{Reset}");
+            DrawCentered($"{Green}╠══════════════════════════════════════════╣{Reset}");
+            DrawCentered($"{Green}║     (HP: 5 / Repair Kit Interval: 200)   ║{Reset}");
+            DrawCentered($"{Green}╚══════════════════════════════════════════╝{Reset}");
+            Console.WriteLine();
+
+            // HARD MODE - Half-Drawn Bar Style
+            DrawCentered($"{Yellow}╔══════════════════════════════════════════╗{Reset}");
+            DrawCentered($"{Yellow}║ [2] HARD MODE                            ║{Reset}");
+            DrawCentered($"{Yellow}╠══════════════════════════════════════════╣{Reset}");
+            DrawCentered($"{Yellow}║     (HP: 3 / Repair Kit Interval: 300)   ║{Reset}");
+            DrawCentered($"{Yellow}╚══════════════════════════════════════════╝{Reset}");
+            Console.WriteLine();
+
+            // EXTREME MODE - Half-Drawn Bar Style
+            DrawCentered($"{Red}╔══════════════════════════════════════════╗{Reset}");
+            DrawCentered($"{Red}║ [3] EXTREME MODE                         ║{Reset}");
+            DrawCentered($"{Red}╠══════════════════════════════════════════╣{Reset}");
+            DrawCentered($"{Red}║     (HP: 2 / Repair Kit Interval: 400)   ║{Reset}");
+            DrawCentered($"{Red}╚══════════════════════════════════════════╝{Reset}");
+
+            Console.WriteLine("\n" + Gray);
+            DrawCentered("Press [ESC] to return to the main menu");
+
+            var key = Console.ReadKey(true).Key;
+            if (key == ConsoleKey.D1 || key == ConsoleKey.NumPad1)
+            {
+                gameSpeed = 45; difficultyName = "Easy"; healthLimit = 5;
+                maxSpawnCount = 1; repairInterval = 200; currentState = State.Menu;
+            }
+            else if (key == ConsoleKey.D2 || key == ConsoleKey.NumPad2)
+            {
+                gameSpeed = 25; difficultyName = "Hard"; healthLimit = 3;
+                maxSpawnCount = 2; repairInterval = 300; currentState = State.Menu;
+            }
+            else if (key == ConsoleKey.D3 || key == ConsoleKey.NumPad3)
+            {
+                gameSpeed = 20; difficultyName = "Extreme"; healthLimit = 2;
+                maxSpawnCount = 3; repairInterval = 400; currentState = State.Menu;
+            }
+            else if (key == ConsoleKey.Escape) currentState = State.Menu;
+        }
+
+        void ResetGame() { player = new Player(); player.Lives = healthLimit; player.CarColor = brightColors[rng.Next(brightColors.Length)]; player.Sprite = carModels[rng.Next(carModels.Length)]; entities.Clear(); lastRepairScore = 0; lastSignScore = 0; }
+
+        void UpdateGame()
+        {
+            if (Console.KeyAvailable)
+            {
+                var key = Console.ReadKey(true).Key;
+                if (key == ConsoleKey.LeftArrow) { player.MoveLeft(); SoundMove(); }
+                if (key == ConsoleKey.RightArrow) { player.MoveRight(); SoundMove(); }
+                if (key == ConsoleKey.Escape) { StopMusic(); currentState = State.Menu; }
+            }
+
+            roadOffset = (roadOffset + 1) % 4;
+            for (int i = entities.Count - 1; i >= 0; i--)
+            {
+                entities[i].Update();
+                if (entities[i].CheckCollision(player))
+                {
+                    if (entities[i] is Obstacle)
+                    {
+                        player.Lives -= 1; SoundCrash();
+                        if (player.Lives <= 0)
+                        {
+                            player.Lives = 0;
+                            SaveScoreToFile(player.Name, player.Score);
+                            SoundGameOver();
+                            StopMusic();
+                            currentState = State.GameOver;
+                            return;
+                        }
+                    }
+                    else if (entities[i] is RepairKit) { if (player.Lives < healthLimit) { player.Lives++; SoundRepair(); } }
+                    entities.RemoveAt(i);
+                }
+                else if (entities[i].Y > RoadHeight + 5) entities.RemoveAt(i);
+            }
+
+            if (player.Score >= lastSignScore + signInterval) { entities.Add(new TrafficSign(35, 0)); lastSignScore = player.Score; }
+
+            bool spawnRepairNow = false;
+            if (player.Score >= lastRepairScore + repairInterval) { spawnRepairNow = true; lastRepairScore = player.Score; }
+
+            if (!entities.Any(e => e.Y < 5 && !(e is TrafficSign)) && rng.Next(0, 10) > 5)
+            {
+                int spawns = rng.Next(1, maxSpawnCount + 1);
+                List<int> used = new List<int>();
+                for (int i = 0; i < spawns; i++)
+                {
+                    int posIdx = rng.Next(spawnPositions.Length);
+                    if (!used.Contains(posIdx))
+                    {
+                        if (spawnRepairNow) { entities.Add(new RepairKit(spawnPositions[posIdx], 0)); spawnRepairNow = false; }
+                        else { entities.Add(new Obstacle(spawnPositions[posIdx], 0)); }
+                        used.Add(posIdx);
+                    }
+                }
+            }
+
+            player.Score += (difficultyName == "Extreme" ? 10 : (difficultyName == "Hard" ? 5 : 2));
+            DrawFrame();
+            Thread.Sleep(gameSpeed);
+        }
+
+        void DrawFrame()
+        {
+            StringBuilder canvas = new StringBuilder();
+
+            // --- TOP COMPACT HEADER ---
+            // Using a single line to save vertical space
+            canvas.Append($"\n  {CyanGlow}LIVE TELEMETRY{Reset} | {Gray}MPH:{Reset} {(player.Score / 10) + 60:D3} | {Gray}STATUS:{Reset} {NeonGreen}NOMINAL{Reset} | {Gray}GEAR:{Reset} 5\n");
+            canvas.Append($"  {Blue}╔{new string('═', RoadRight - RoadLeft + 1)}╗{Reset}\n");
+
+            for (int y = 0; y < RoadHeight; y++)
+            {
+                // Road Start
+                canvas.Append($"  {Blue}║{Reset}");
+
+                // --- THE CORE ROAD (Untouched Drawing Logic) ---
+                for (int x = RoadLeft; x <= RoadRight; x++)
+                {
+                    // Player Drawing
+                    if (y >= player.Y - 1 && y <= player.Y + 1 && x >= player.X - 2 && x <= player.X + 2)
+                    {
+                        string pixel = player.Sprite[y - (player.Y - 1)][x - (player.X - 2)].ToString();
+                        // Check for wheel parts to keep them gray
+                        if (pixel == "o" || pixel == "/" || pixel == "\\" || pixel == "H") canvas.Append(pixel);
+                        else canvas.Append($"{player.CarColor}{pixel}{Reset}");
+                    }
+                    else
+                    {
+                        var ent = entities.FirstOrDefault(e => {
+                            int h = e.Sprite.Length / 2;
+                            int w = e.Sprite[0].Length / 2;
+                            return y >= e.Y - h && y <= e.Y + h && x >= e.X - w && x <= e.X + w;
+                        });
+
+                        if (ent != null)
+                        {
+                            int sY = y - (ent.Y - (ent.Sprite.Length / 2));
+                            int sX = x - (ent.X - (ent.Sprite[0].Length / 2));
+                            if (sY >= 0 && sY < ent.Sprite.Length && sX >= 0 && sX < ent.Sprite[sY].Length)
+                                canvas.Append($"{ent.Color}{ent.Sprite[sY][sX]}{Reset}");
+                            else canvas.Append(" ");
+                        }
+                        else if (x == RoadLeft || x == RoadRight) canvas.Append($"{Gray}█{Reset}");
+                        else if ((x == 20 || x == 35 || x == 50) && (y + roadOffset) % 4 == 0) canvas.Append($"{White}¦{Reset}");
+                        else canvas.Append(" ");
+                    }
+                }
+
+                // Road End
+                canvas.Append($"{Blue}║{Reset}");
+
+                // --- THE RIGHT-SIDE DATA PANEL ---
+                // We only draw data on specific lines to keep it clean
+                switch (y)
+                {
+                    case 1: canvas.Append($"  {White}ID: {player.Name.ToUpper()}{Reset}"); break;
+                    case 2: canvas.Append($"  {Yellow}SC: {player.Score:D6}{Reset}"); break;
+                    case 3: canvas.Append($"  {Red}HP: {player.GetHearts()}{Reset}"); break;
+                    case 5: canvas.Append($"  {DarkGray}----------{Reset}"); break;
+                    case 6: canvas.Append($"  {Orange}OIL: 190°F{Reset}"); break;
+                    case 9:
+                        int rpm = (roadOffset + y) % 8;
+                        canvas.Append($"  {Gray}RPM: [{NeonGreen}{new string('|', rpm)}{Gray}{new string('.', 7 - rpm)}]{Reset}");
+                        break;
+                    case 15: canvas.Append($"  {CyanGlow}TURBO: READY{Reset}"); break;
+                }
+
+                canvas.Append("\n");
+            }
+
+            // --- BOTTOM BORDER ---
+            canvas.Append($"  {Blue}╚{new string('═', RoadRight - RoadLeft + 1)}╝{Reset}\n");
+
+            // Final Footer
+            canvas.Append($"  {DarkGray}VITAL_LINK_ESTABLISHED // SCANNING_OBSTACLES...{Reset}");
+
+            // Reset cursor to top to prevent flickering
+            try { Console.SetCursorPosition(0, 0); } catch { }
+            Console.Write(canvas.ToString());
+        }
+
+        void DrawGameOver()
+        {
+            Console.Clear();
+            Console.WriteLine("\n\n\n");
+            DrawCentered($"{Red}{Bold}╔══════════════════════════════════════════╗{Reset}");
+            DrawCentered($"{Red}{Bold}║           CRITICAL SYSTEM FAILURE          ║{Reset}");
+            DrawCentered($"{Red}{Bold}╚══════════════════════════════════════════╝{Reset}");
+            Console.WriteLine("\n");
+            DrawCentered($"{White}--- POST-CRASH DIAGNOSTIC ---{Reset}");
+            DrawCentered($"{Gray}DRIVER:         {Cyan}{player.Name}{Reset}");
+            DrawCentered($"{Gray}FINAL DISTANCE: {Yellow}{player.Score} Units{Reset}");
+            var best = scoreHistory.OrderByDescending(x => x.Score).FirstOrDefault();
+            if (player.Score >= (best.Name != null ? best.Score : 0)) DrawCentered($"{Green}{Bold}!!! NEW HALL OF FAME RECORD !!!{Reset}");
+            Console.WriteLine("\n" + Red + "VEHICLE STATUS: DESTROYED" + Reset);
+            Console.WriteLine("\n\n" + Green + "PRESS ANY KEY TO RETURN TO HQ" + Reset);
+            Console.ReadKey(true);
+            currentState = State.Menu;
+        }
+    }
+}
