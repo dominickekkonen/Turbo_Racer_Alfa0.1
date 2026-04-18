@@ -169,9 +169,15 @@ namespace Turbo_Racer_Alfa1.Main
             DrawCentered($"{lMid}  {rMid}");
             DrawCentered($"{lBot}  {rBot}");
         }
-
         void DrawMenu()
         {
+            Console.Clear();
+            // 2. Telemetry Subtitle
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            DrawCentered("« SYSTEM STATUS: ONLINE »");
+            DrawCentered("« DRIVE PROTOCOL: ALPHA-1 »");
+            Console.WriteLine("\n");
+
             if (musicThread == null || !musicThread.IsAlive)
             {
                 musicThread = new Thread(MusicPlayer.PlayHelmetBetter) { IsBackground = true };
