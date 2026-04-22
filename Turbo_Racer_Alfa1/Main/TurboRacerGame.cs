@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 using Turbo_Racer_Alfa1.Addons;
@@ -16,12 +17,15 @@ namespace Turbo_Racer_Alfa1.Main
         }
 
         private Pixel[,] _screenBuffer;
+        private Pixel[,] _previousBuffer;
         private int _bufferWidth;
         private int _bufferHeight;
+        private readonly StringBuilder _renderBuilder = new StringBuilder(16384);
 
         const string Reset = "\x1b[0m", Red = "\x1b[31m", Green = "\x1b[32m",
                      Yellow = "\x1b[33m", Blue = "\x1b[34m", Cyan = "\x1b[36m",
                      White = "\x1b[37m", Bold = "\x1b[1m", Gray = "\x1b[90m", Magenta = "\x1b[35m";
+        const string DefaultBg = "\x1b[40m";
         const string DarkOrange = "\x1b[38;5;202m";
         const string LightYellow = "\x1b[38;5;226m";
         const string CyanGlow = "\x1b[38;5;81m";
@@ -74,6 +78,8 @@ namespace Turbo_Racer_Alfa1.Main
         new string[] { "-=X=-", " |V| ", "-=X=-" }
         };
 
+        static readonly Pixel EmptyPixel = new Pixel { Char = ' ', Color = White, BgColor = DefaultBg };
+
         void SoundMove() => Console.Beep(450, 15);
         void SoundCrash() => Console.Beep(180, 100);
         void SoundRepair() => Console.Beep(900, 60);
@@ -83,15 +89,8 @@ namespace Turbo_Racer_Alfa1.Main
         {
             Console.OutputEncoding = Encoding.UTF8;
             LoadScoresFromFile();
+            EnsureBufferSize();
 
-            // Initialize buffer based on window size
-            _bufferWidth = Console.WindowWidth;
-            _bufferHeight = Console.WindowHeight;
-            _screenBuffer = new Pixel[_bufferWidth, _bufferHeight];
-
-            try { Console.CursorVisible = false; } catch { }
-            Console.OutputEncoding = Encoding.UTF8;
-            LoadScoresFromFile();
             try { Console.CursorVisible = false; } catch { }
 
             while (isRunning)
@@ -519,32 +518,67 @@ namespace Turbo_Racer_Alfa1.Main
             }
         }
 
-        void ResetGame() { player = new Player(); player.Lives = healthLimit; player.CarColor = brightColors[rng.Next(brightColors.Length)]; player.Sprite = carModels[rng.Next(carModels.Length)]; entities.Clear(); lastRepairScore = 0; lastSignScore = 0; }
+        void ResetGame()
+        {
+            player = new Player();
+            player.Lives = healthLimit;
+            player.CarColor = brightColors[rng.Next(brightColors.Length)];
+            player.Sprite = carModels[rng.Next(carModels.Length)];
+            entities.Clear();
+            lastRepairScore = 0;
+            lastSignScore = 0;
+            roadOffset = 0;
+            isTurboActive = false;
+            turboEndTime = DateTime.MinValue;
+            nextTurboReadyTime = DateTime.MinValue;
+            EnsureBufferSize();
+            InvalidateRenderCache();
+            Console.Clear();
+        }
 
         void UpdateGame()
         {
-            if (Console.KeyAvailable)
+            long frameStart = Stopwatch.GetTimestamp();
+            EnsureBufferSize();
+
+            int horizontalMove = 0;
+            bool activateTurbo = false;
+
+            while (Console.KeyAvailable)
             {
-                ConsoleKeyInfo keyInfo = Console.ReadKey(true);
-                var key = keyInfo.Key;
+                var key = Console.ReadKey(true).Key;
 
-                if (key == ConsoleKey.LeftArrow) { player.MoveLeft(); SoundMove(); }
-                if (key == ConsoleKey.RightArrow) { player.MoveRight(); SoundMove(); }
-                if (key == ConsoleKey.Escape) { StopMusic(); currentState = State.Menu; return; }
-
-                // --- TURBO ACTIVATION WITH RECHARGE CHECK ---
-                if (key == ConsoleKey.Spacebar || key == ConsoleKey.W || key == ConsoleKey.UpArrow)
+                if (key == ConsoleKey.LeftArrow) horizontalMove = -1;
+                else if (key == ConsoleKey.RightArrow) horizontalMove = 1;
+                else if (key == ConsoleKey.Escape)
                 {
-                    // Only activate if not active AND recharge is finished
-                    if (!isTurboActive && DateTime.Now >= nextTurboReadyTime)
-                    {
-                        isTurboActive = true;
-                        turboEndTime = DateTime.Now.AddSeconds(5);
-                        // Set the next ready time to 15 seconds from NOW
-                        nextTurboReadyTime = DateTime.Now.AddSeconds(turboCooldownSeconds);
-                        Console.Beep(800, 50); // Optional: "Engaged" sound
-                    }
+                    StopMusic();
+                    currentState = State.Menu;
+                    return;
                 }
+                else if (key == ConsoleKey.Spacebar || key == ConsoleKey.W || key == ConsoleKey.UpArrow)
+                {
+                    activateTurbo = true;
+                }
+            }
+
+            if (horizontalMove < 0)
+            {
+                player.MoveLeft();
+                SoundMove();
+            }
+            else if (horizontalMove > 0)
+            {
+                player.MoveRight();
+                SoundMove();
+            }
+
+            if (activateTurbo && !isTurboActive && DateTime.Now >= nextTurboReadyTime)
+            {
+                isTurboActive = true;
+                turboEndTime = DateTime.Now.AddSeconds(5);
+                nextTurboReadyTime = DateTime.Now.AddSeconds(turboCooldownSeconds);
+                Console.Beep(800, 50);
             }
 
             // --- ENTITY & ROAD UPDATE ---
@@ -556,7 +590,8 @@ namespace Turbo_Racer_Alfa1.Main
                 {
                     if (entities[i] is Obstacle)
                     {
-                        player.Lives -= 1; SoundCrash();
+                        player.Lives -= 1;
+                        SoundCrash();
                         if (player.Lives <= 0)
                         {
                             player.Lives = 0;
@@ -569,54 +604,82 @@ namespace Turbo_Racer_Alfa1.Main
                     }
                     else if (entities[i] is RepairKit)
                     {
-                        if (player.Lives < healthLimit) { player.Lives++; SoundRepair(); }
+                        if (player.Lives < healthLimit)
+                        {
+                            player.Lives++;
+                            SoundRepair();
+                        }
                     }
+
                     entities.RemoveAt(i);
                 }
-                else if (entities[i].Y > RoadHeight + 5) entities.RemoveAt(i);
+                else if (entities[i].Y > RoadHeight + 5)
+                {
+                    entities.RemoveAt(i);
+                }
             }
 
-            // --- SPAWN LOGIC ---
-            if (player.Score >= lastSignScore + signInterval) { entities.Add(new TrafficSign(35, 0)); lastSignScore = player.Score; }
+            if (player.Score >= lastSignScore + signInterval)
+            {
+                entities.Add(new TrafficSign(35, 0));
+                lastSignScore = player.Score;
+            }
 
             bool spawnRepairNow = false;
-            if (player.Score >= lastRepairScore + repairInterval) { spawnRepairNow = true; lastRepairScore = player.Score; }
+            if (player.Score >= lastRepairScore + repairInterval)
+            {
+                spawnRepairNow = true;
+                lastRepairScore = player.Score;
+            }
 
-            if (!entities.Any(e => e.Y < 5 && !(e is TrafficSign)) && rng.Next(0, 10) > 5)
+            bool spawnZoneBlocked = false;
+            for (int i = 0; i < entities.Count; i++)
+            {
+                if (entities[i].Y < 5 && entities[i] is not TrafficSign)
+                {
+                    spawnZoneBlocked = true;
+                    break;
+                }
+            }
+
+            if (!spawnZoneBlocked && rng.Next(0, 10) > 5)
             {
                 int spawns = rng.Next(1, maxSpawnCount + 1);
-                List<int> used = new List<int>();
-                for (int i = 0; i < spawns; i++)
+                HashSet<int> used = new HashSet<int>();
+                while (used.Count < spawns)
                 {
                     int posIdx = rng.Next(spawnPositions.Length);
-                    if (!used.Contains(posIdx))
+                    if (!used.Add(posIdx)) continue;
+
+                    if (spawnRepairNow)
                     {
-                        if (spawnRepairNow) { entities.Add(new RepairKit(spawnPositions[posIdx], 0)); spawnRepairNow = false; }
-                        else { entities.Add(new Obstacle(spawnPositions[posIdx], 0)); }
-                        used.Add(posIdx);
+                        entities.Add(new RepairKit(spawnPositions[posIdx], 0));
+                        spawnRepairNow = false;
+                    }
+                    else
+                    {
+                        entities.Add(new Obstacle(spawnPositions[posIdx], 0));
                     }
                 }
             }
 
-            // --- TURBO DURATION CHECK & SCORE ---
             if (isTurboActive && DateTime.Now >= turboEndTime)
             {
                 isTurboActive = false;
             }
 
-            // Determine speed and score
-            int currentSleepTime = isTurboActive ? gameSpeed / 2 : gameSpeed;
+            int targetFrameTime = isTurboActive ? gameSpeed / 2 : gameSpeed;
             int scoreMultiplier = isTurboActive ? 2 : 1;
-
-            int baseScoreGain = (difficultyName == "Extreme" ? 10 : (difficultyName == "Hard" ? 5 : 2));
-            player.Score += (baseScoreGain * scoreMultiplier);
+            int baseScoreGain = difficultyName == "Extreme" ? 10 : (difficultyName == "Hard" ? 5 : 2);
+            player.Score += baseScoreGain * scoreMultiplier;
 
             DrawFrame();
-            Thread.Sleep(currentSleepTime);
+            SleepForRemainingFrameTime(targetFrameTime, frameStart);
         }
 
         void DrawFrame()
         {
+            EnsureBufferSize();
             ClearBuffer();
 
             // 1. DYNAMIC DIFFICULTY CALCULATION
@@ -788,43 +851,126 @@ namespace Turbo_Racer_Alfa1.Main
             {
                 for (int x = 0; x < _bufferWidth; x++)
                 {
-                    _screenBuffer[x, y] = new Pixel { Char = ' ', Color = White, BgColor = "\x1b[40m" };
+                    _screenBuffer[x, y] = EmptyPixel;
                 }
             }
         }
 
-        void WriteToBuffer(int x, int y, string text, string fg = White, string bg = "\x1b[40m")
+        void WriteToBuffer(int x, int y, string text, string fg = White, string bg = DefaultBg)
         {
-            if (y < 0 || y >= _bufferHeight) return;
-            // Strip ANSI from text to get true length for positioning
-            string cleanText = Regex.Replace(text, @"\x1b\[[0-9;]*m", "");
-            for (int i = 0; i < cleanText.Length; i++)
+            if (y < 0 || y >= _bufferHeight || string.IsNullOrEmpty(text)) return;
+
+            int posX = x;
+            for (int i = 0; i < text.Length && posX < _bufferWidth; i++)
             {
-                int posX = x + i;
-                if (posX >= 0 && posX < _bufferWidth)
-                    _screenBuffer[posX, y] = new Pixel { Char = cleanText[i], Color = fg, BgColor = bg };
+                if (text[i] == '\x1b')
+                {
+                    while (i < text.Length && text[i] != 'm') i++;
+                    continue;
+                }
+
+                if (posX >= 0)
+                {
+                    _screenBuffer[posX, y] = new Pixel { Char = text[i], Color = fg, BgColor = bg };
+                }
+
+                posX++;
             }
         }
 
         void RenderBuffer()
         {
-            StringBuilder sb = new StringBuilder();
-            sb.Append("\x1b[H"); // Move cursor to top-left without flickering
-            string lastFg = "", lastBg = "";
+            _renderBuilder.Clear();
 
             for (int y = 0; y < _bufferHeight; y++)
             {
-                for (int x = 0; x < _bufferWidth; x++)
+                int x = 0;
+                while (x < _bufferWidth)
                 {
-                    var p = _screenBuffer[x, y];
-                    if (p.Color != lastFg) { sb.Append(p.Color); lastFg = p.Color; }
-                    if (p.BgColor != lastBg) { sb.Append(p.BgColor); lastBg = p.BgColor; }
-                    sb.Append(p.Char);
+                    if (PixelsEqual(_screenBuffer[x, y], _previousBuffer[x, y]))
+                    {
+                        x++;
+                        continue;
+                    }
+
+                    _renderBuilder.Append("\x1b[");
+                    _renderBuilder.Append(y + 1);
+                    _renderBuilder.Append(';');
+                    _renderBuilder.Append(x + 1);
+                    _renderBuilder.Append('H');
+
+                    string lastFg = string.Empty;
+                    string lastBg = string.Empty;
+
+                    while (x < _bufferWidth && !PixelsEqual(_screenBuffer[x, y], _previousBuffer[x, y]))
+                    {
+                        var pixel = _screenBuffer[x, y];
+
+                        if (pixel.Color != lastFg)
+                        {
+                            _renderBuilder.Append(pixel.Color);
+                            lastFg = pixel.Color;
+                        }
+
+                        if (pixel.BgColor != lastBg)
+                        {
+                            _renderBuilder.Append(pixel.BgColor);
+                            lastBg = pixel.BgColor;
+                        }
+
+                        _renderBuilder.Append(pixel.Char);
+                        _previousBuffer[x, y] = pixel;
+                        x++;
+                    }
                 }
-                if (y < _bufferHeight - 1) sb.Append('\n');
             }
-            Console.Write(sb.ToString());
-            //
+
+            if (_renderBuilder.Length > 0)
+            {
+                _renderBuilder.Append(Reset);
+                Console.Write(_renderBuilder.ToString());
+            }
         }
+
+        void EnsureBufferSize()
+        {
+            int width = Console.WindowWidth;
+            int height = Console.WindowHeight;
+
+            if (width <= 0 || height <= 0) return;
+
+            if (_screenBuffer == null || width != _bufferWidth || height != _bufferHeight)
+            {
+                _bufferWidth = width;
+                _bufferHeight = height;
+                _screenBuffer = new Pixel[_bufferWidth, _bufferHeight];
+                _previousBuffer = new Pixel[_bufferWidth, _bufferHeight];
+                InvalidateRenderCache();
+                Console.Clear();
+            }
+        }
+
+        void InvalidateRenderCache()
+        {
+            if (_previousBuffer == null) return;
+            _previousBuffer = new Pixel[_bufferWidth, _bufferHeight];
+        }
+
+        void SleepForRemainingFrameTime(int targetFrameTimeMs, long frameStartTimestamp)
+        {
+            int elapsedMs = (int)Stopwatch.GetElapsedTime(frameStartTimestamp).TotalMilliseconds;
+            int remainingMs = targetFrameTimeMs - elapsedMs;
+
+            if (remainingMs > 0)
+            {
+                Thread.Sleep(remainingMs);
+            }
+        }
+
+        static bool PixelsEqual(Pixel a, Pixel b) =>
+            a.Char == b.Char &&
+            a.Color == b.Color &&
+            a.BgColor == b.BgColor;
     }
 }
+
